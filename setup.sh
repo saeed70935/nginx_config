@@ -23,7 +23,7 @@ if [[ "$MainDomain" == "$domain" ]]; then
     MainDomain="$domain"
 fi
 
-# Get Cloudflare API credentials for DNS challenge
+# Get Cloudflare API credentials
 while [[ -z "$CF_API_TOKEN" ]]; do
     echo -e "${YELLOW}For wildcard SSL, we need Cloudflare API Token${NC}"
     echo -e "${BLUE}Go to: https://dash.cloudflare.com/profile/api-tokens${NC}"
@@ -31,23 +31,19 @@ while [[ -z "$CF_API_TOKEN" ]]; do
     read -p "Enter Cloudflare API Token: " CF_API_TOKEN
 done
 
-while [[ -z "$CF_ZONE_ID" ]]; do
-    echo -e "${BLUE}Get Zone ID from Cloudflare Dashboard (right sidebar)${NC}"
-    read -p "Enter Cloudflare Zone ID: " CF_ZONE_ID
-done
-
 echo -e "${BLUE}Domain: $domain${NC}"
 echo -e "${BLUE}Main Domain: $MainDomain${NC}"
 
-# Update packages
+# Update packages and install requirements
 echo -e "${YELLOW}Installing packages...${NC}"
 apt update -qq
 apt install -y nginx openssl unzip wget python3-pip
 
 # Install certbot and cloudflare plugin
+echo -e "${YELLOW}Installing certbot and cloudflare plugin...${NC}"
 pip3 install certbot certbot-dns-cloudflare
 
-# Stop nginx temporarily for initial setup
+# Stop nginx temporarily
 systemctl stop nginx 2>/dev/null
 fuser -k 80/tcp 443/tcp 2>/dev/null
 
@@ -62,21 +58,29 @@ else
 fi
 
 # Create directories
-mkdir -p /etc/ssl/{certs,private} /var/www/html /etc/nginx/sites-{available,enabled}
+mkdir -p /etc/ssl/{certs,private} /var/www/html /etc/nginx/sites-{available,enabled} /etc/letsencrypt
 
-# Create Cloudflare credentials file for certbot
-mkdir -p /etc/letsencrypt
+# Create Cloudflare credentials file
 cat > /etc/letsencrypt/cloudflare.ini << EOF
 dns_cloudflare_api_token = $CF_API_TOKEN
 EOF
 chmod 600 /etc/letsencrypt/cloudflare.ini
 
-# Get wildcard SSL certificate using DNS challenge
+# Test API first
+echo -e "${YELLOW}Testing Cloudflare API...${NC}"
+if ! curl -s "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+  -H "Authorization: Bearer $CF_API_TOKEN" | grep -q '"success":true'; then
+    echo -e "${RED}API Token test failed! Please check your token.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}API Token verified!${NC}"
+
+# Get wildcard SSL certificate
 echo -e "${YELLOW}Getting Let's Encrypt wildcard certificate...${NC}"
 certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
-  --dns-cloudflare-propagation-seconds 30 \
+  --dns-cloudflare-propagation-seconds 60 \
   -d "$MainDomain" \
   -d "*.$MainDomain" \
   --non-interactive \
@@ -85,13 +89,13 @@ certbot certonly \
   --cert-name "$MainDomain"
 
 if [[ ! -d "/etc/letsencrypt/live/$MainDomain/" ]]; then
-    echo -e "${RED}SSL certificate failed! Check API credentials!${NC}"
+    echo -e "${RED}SSL certificate failed! Check the logs: /var/log/letsencrypt/letsencrypt.log${NC}"
     exit 1
 fi
 
 echo -e "${GREEN}Wildcard SSL certificate obtained successfully!${NC}"
 
-# Copy certificates to standard location
+# Copy certificates to nginx location
 cp "/etc/letsencrypt/live/$MainDomain/fullchain.pem" "/etc/ssl/certs/"
 cp "/etc/letsencrypt/live/$MainDomain/privkey.pem" "/etc/ssl/private/"
 chmod 644 /etc/ssl/certs/fullchain.pem
@@ -205,11 +209,11 @@ fi
 echo -e "${YELLOW}Installing random fake website template...${NC}"
 cd /tmp
 if wget -q https://github.com/GFW4Fun/randomfakehtml/archive/refs/heads/master.zip; then
-    unzip -q master.zip
+    unzip -q master.zip 2>/dev/null
     if [[ -d "randomfakehtml-master" ]]; then
         cd randomfakehtml-master
         rm -rf assets .gitattributes README.md _config.yml 2>/dev/null
-        TEMPLATE=$(find . -maxdepth 1 -type d ! -name "." | sed 's|^\./||' | shuf -n1)
+        TEMPLATE=$(find . -maxdepth 1 -type d ! -name "." | sed 's|^\./||' | shuf -n1 2>/dev/null)
         if [[ -n "$TEMPLATE" && -d "$TEMPLATE" ]]; then
             echo -e "${BLUE}Installing template: $TEMPLATE${NC}"
             rm -rf /var/www/html/*
@@ -218,6 +222,45 @@ if wget -q https://github.com/GFW4Fun/randomfakehtml/archive/refs/heads/master.z
         fi
     fi
 fi
+
+# Fallback to simple page if template failed
+if [[ ! -f "/var/www/html/index.html" ]]; then
+    cat > /var/www/html/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Ready</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0; padding: 0; min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            color: white;
+        }
+        .container {
+            text-align: center;
+            background: rgba(255,255,255,0.1);
+            padding: 3rem; border-radius: 15px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        }
+        h1 { font-size: 3rem; margin-bottom: 1rem; }
+        p { font-size: 1.2rem; opacity: 0.9; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Server Ready</h1>
+        <p>Nginx with Let's Encrypt SSL is running</p>
+    </div>
+</body>
+</html>
+EOF
+fi
+
 cd /root
 rm -rf /tmp/randomfakehtml-master /tmp/master.zip
 
@@ -229,7 +272,8 @@ chmod -R 755 /var/www/html/
 systemctl enable nginx
 systemctl start nginx
 
-# Create renewal script that updates nginx certificates
+# Create renewal hook script
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh << EOF
 #!/bin/bash
 # Copy renewed certificates to nginx location
@@ -238,6 +282,7 @@ cp "/etc/letsencrypt/live/$MainDomain/privkey.pem" "/etc/ssl/private/"
 chmod 644 /etc/ssl/certs/fullchain.pem
 chmod 600 /etc/ssl/private/privkey.pem
 systemctl reload nginx
+echo "\$(date): SSL certificates renewed and nginx reloaded" >> /var/log/ssl-renewal.log
 EOF
 chmod +x /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh
 
@@ -251,11 +296,11 @@ EOF
 ) | crontab -
 
 # Test renewal (dry run)
-echo -e "${YELLOW}Testing SSL renewal...${NC}"
-if certbot renew --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini --dry-run; then
-    echo -e "${GREEN}SSL renewal test successful!${NC}"
+echo -e "${YELLOW}Testing SSL auto-renewal...${NC}"
+if certbot renew --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini --dry-run --quiet; then
+    echo -e "${GREEN}SSL auto-renewal test successful!${NC}"
 else
-    echo -e "${RED}SSL renewal test failed!${NC}"
+    echo -e "${RED}SSL auto-renewal test failed! Check /var/log/letsencrypt/letsencrypt.log${NC}"
 fi
 
 # Show results
@@ -272,10 +317,14 @@ echo -e "${GREEN}===========================================${NC}"
 echo -e "${YELLOW}🌐 Your site: https://$domain${NC}"
 echo -e "${YELLOW}🔒 SSL valid for: $MainDomain + *.$MainDomain${NC}"
 echo -e "${YELLOW}🔄 Auto-renewal: Every 12 hours${NC}"
+echo -e "${YELLOW}📝 Renewal logs: /var/log/ssl-renewal.log${NC}"
 echo -e "${GREEN}===========================================${NC}"
 
 # Show certificate info
 echo -e "${BLUE}Certificate details:${NC}"
 openssl x509 -in /etc/ssl/certs/fullchain.pem -text -noout | grep -E "Subject:|Not After:|DNS:" | head -5
 
-echo -e "${GREEN}Done! SSL will auto-renew without interrupting nginx! 🎉${NC}"
+echo -e "${GREEN}"
+echo "🎉 Success! Your SSL certificate is valid and trusted by all browsers!"
+echo "🔄 Automatic renewal is configured - no manual intervention needed!"
+echo -e "${NC}"
