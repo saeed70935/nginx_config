@@ -26,14 +26,8 @@ if [[ "${SubDomain}.${MainDomain}" != "${domain}" ]] ; then
     MainDomain=${domain}
 fi
 
-# Get Cloudflare credentials
-while [[ -z "$CF_API_TOKEN" ]]; do
-    read -rp $'\e[1;32;40m Enter Cloudflare API Token: \e[0m' CF_API_TOKEN
-done
-
-while [[ -z "$CF_ZONE_ID" ]]; do
-    read -rp $'\e[1;32;40m Enter Cloudflare Zone ID: \e[0m' CF_ZONE_ID
-done
+# Get Cloudflare credentials (Optional - not used for manual certificate)
+# Note: Using manual certificate input instead
 
 # Install nginx and required packages
 sudo $Pak -y purge python3-certbot-nginx 2>/dev/null || true
@@ -66,83 +60,75 @@ sudo nginx -s stop 2>/dev/null
 sudo systemctl stop nginx 2>/dev/null
 sudo fuser -k 80/tcp 80/udp 443/tcp 443/udp 2>/dev/null
 
-# Create SSL certificate directory
-mkdir -p "/etc/ssl/cloudflare/"
+# Manual SSL Certificate Input
+msg_inf "SSL Certificate Setup"
+msg_war "============================================"
+msg_inf "Go to Cloudflare Dashboard:"
+msg_inf "1. SSL/TLS → Origin Server"
+msg_inf "2. Create Certificate"
+msg_inf "3. Generate private key and CSR with Cloudflare"
+msg_inf "4. Hostnames: $MainDomain, *.$MainDomain"
+msg_inf "5. Certificate Validity: 15 years"
+msg_war "============================================"
 
-# Generate Cloudflare Origin Certificate automatically
-msg_inf "Creating Cloudflare Origin Certificate for $MainDomain and all subdomains..."
+# Create SSL directories
+mkdir -p /etc/ssl/certs /etc/ssl/private
 
-# Create private key
-openssl genrsa -out "/etc/ssl/cloudflare/${MainDomain}.key" 2048
+# Get Certificate
+echo ""
+msg_inf "Paste the Certificate (including -----BEGIN CERTIFICATE----- and -----END CERTIFICATE-----):"
+msg_inf "Press Ctrl+D when finished:"
+echo ""
+cat > "/etc/ssl/certs/$MainDomain.crt"
 
-# Create CSR with SAN for wildcard and main domain
-cat > "/tmp/${MainDomain}.conf" << EOF
-[req]
-distinguished_name = req_distinguished_name
-req_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-CN = ${MainDomain}
-
-[v3_req]
-keyUsage = keyEncipherment, dataEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = ${MainDomain}
-DNS.2 = *.${MainDomain}
-EOF
-
-# Generate CSR
-openssl req -new -key "/etc/ssl/cloudflare/${MainDomain}.key" -out "/tmp/${MainDomain}.csr" -config "/tmp/${MainDomain}.conf"
-
-# Read CSR content and escape properly for JSON
-CSR_CONTENT=$(cat "/tmp/${MainDomain}.csr" | sed ':a;N;$!ba;s/\n/\\n/g')
-
-# Create certificate via Cloudflare API
-msg_inf "Requesting certificate from Cloudflare API..."
-
-# Create JSON payload file to avoid shell escaping issues
-cat > "/tmp/cert_request.json" << EOF
-{
-  "type": "origin-rsa",
-  "hostnames": ["${MainDomain}", "*.${MainDomain}"],
-  "requested_validity": 5475,
-  "csr": "${CSR_CONTENT}"
-}
-EOF
-
-API_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/certificates" \
-  -H "Authorization: Bearer $CF_API_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d @"/tmp/cert_request.json")
-
-# Check if API call was successful
-if echo "$API_RESPONSE" | jq -r '.success' | grep -q "true"; then
-    # Extract certificate from response
-    echo "$API_RESPONSE" | jq -r '.result.certificate' > "/etc/ssl/cloudflare/${MainDomain}.crt"
-    
-    # Set proper permissions
-    chmod 644 "/etc/ssl/cloudflare/${MainDomain}.crt"
-    chmod 600 "/etc/ssl/cloudflare/${MainDomain}.key"
-    
-    msg_ok "Cloudflare Origin Certificate created successfully!"
-    
-    # Show certificate info
-    msg_inf "Certificate details:"
-    echo "$API_RESPONSE" | jq -r '.result | "ID: \(.id)\nExpires: \(.expires_on)\nHostnames: \(.hostnames | join(", "))"'
-    
-else
-    msg_err "Failed to create certificate via Cloudflare API"
-    echo "Error response:"
-    echo "$API_RESPONSE" | jq -r '.errors[]?.message // "Unknown error"'
+# Verify certificate was pasted
+if [[ ! -f "/etc/ssl/certs/$MainDomain.crt" ]] || [[ ! -s "/etc/ssl/certs/$MainDomain.crt" ]]; then
+    msg_err "Certificate file is empty or not created. Please try again."
     exit 1
 fi
 
-# Clean up temporary files
-rm -f "/tmp/${MainDomain}.csr" "/tmp/${MainDomain}.conf" "/tmp/cert_request.json"
+# Verify certificate format
+if ! openssl x509 -in "/etc/ssl/certs/$MainDomain.crt" -text -noout > /dev/null 2>&1; then
+    msg_err "Invalid certificate format. Please check and try again."
+    exit 1
+fi
+
+echo ""
+msg_ok "Certificate received successfully!"
+echo ""
+
+# Get Private Key
+msg_inf "Now paste the Private Key (including -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----):"
+msg_inf "Press Ctrl+D when finished:"
+echo ""
+cat > "/etc/ssl/private/$MainDomain.key"
+
+# Verify private key was pasted
+if [[ ! -f "/etc/ssl/private/$MainDomain.key" ]] || [[ ! -s "/etc/ssl/private/$MainDomain.key" ]]; then
+    msg_err "Private key file is empty or not created. Please try again."
+    exit 1
+fi
+
+# Verify private key format
+if ! openssl rsa -in "/etc/ssl/private/$MainDomain.key" -check > /dev/null 2>&1; then
+    msg_err "Invalid private key format. Please check and try again."
+    exit 1
+fi
+
+# Set proper permissions
+chmod 644 "/etc/ssl/certs/$MainDomain.crt"
+chmod 600 "/etc/ssl/private/$MainDomain.key"
+
+# Set SSL paths
+SSL_CERT_PATH="/etc/ssl/certs/$MainDomain.crt"
+SSL_KEY_PATH="/etc/ssl/private/$MainDomain.key"
+
+msg_ok "Private key received successfully!"
+msg_ok "SSL Certificate setup completed!"
+
+# Show certificate info
+msg_inf "Certificate details:"
+openssl x509 -in "$SSL_CERT_PATH" -text -noout | grep -E "Subject:|Not Before:|Not After:|DNS:" | awk '{print "\033[1;36;40m" $0 "\033[0m"}'
 
 # Create nginx directories
 mkdir -p /etc/nginx/sites-{available,enabled} /var/log/nginx /var/www /var/www/html
@@ -195,8 +181,8 @@ server {
     # SSL Configuration
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-    ssl_certificate /etc/ssl/cloudflare/DOMAIN_PLACEHOLDER.crt;
-    ssl_certificate_key /etc/ssl/cloudflare/DOMAIN_PLACEHOLDER.key;
+    ssl_certificate SSL_CERT_PATH_PLACEHOLDER;
+    ssl_certificate_key SSL_KEY_PATH_PLACEHOLDER;
     
     # Security checks
     if ($host !~* ^(.+\.)?DOMAIN_PLACEHOLDER$ ){return 444;}
@@ -230,6 +216,8 @@ NGINX_CONFIG
 sed -i "s/DOMAIN_PLACEHOLDER/$MainDomain/g" "/etc/nginx/sites-available/$MainDomain"
 sed -i "s/HTTP2_OLD/$OLD_H2/g" "/etc/nginx/sites-available/$MainDomain"
 sed -i "s/HTTP2_NEW/$NEW_H2/g" "/etc/nginx/sites-available/$MainDomain"
+sed -i "s|SSL_CERT_PATH_PLACEHOLDER|$SSL_CERT_PATH|g" "/etc/nginx/sites-available/$MainDomain"
+sed -i "s|SSL_KEY_PATH_PLACEHOLDER|$SSL_KEY_PATH|g" "/etc/nginx/sites-available/$MainDomain"
 
 # Enable site
 if [[ -f "/etc/nginx/sites-available/$MainDomain" ]]; then
@@ -287,7 +275,7 @@ cat > "/var/www/html/index.html" << 'EOF'
 </html>
 EOF
 
-# Setup cron job for nginx reload only (no Cloudflare IP updates in CDN OFF mode)
+# Setup cron job for nginx reload only (manual certificates don't need renewal)
 tasks=(
   "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
 )
@@ -349,20 +337,19 @@ fi
 
 # Show results
 clear
-msg_ok "Nginx successfully installed and configured with Cloudflare Origin Certificate!"
+msg_ok "Nginx successfully installed and configured with Manual SSL Certificate!"
 msg_inf "Mode: CDN OFF - Direct access enabled"
 msg_inf "Domain: https://$domain"
-msg_inf "SSL Certificate: /etc/ssl/cloudflare/$MainDomain.crt"
-msg_inf "SSL Private Key: /etc/ssl/cloudflare/$MainDomain.key"
+msg_inf "SSL Certificate: $SSL_CERT_PATH"
+msg_inf "SSL Private Key: $SSL_KEY_PATH"
 msg_inf "Random fake website template has been installed"
 nginx -T | grep -i 'configuration file /etc/nginx/sites-enabled/' | sed 's/.*configuration file //' | tr -d ':' | awk '{print "\033[1;32;40m" $0 "\033[0m"}'
-openssl x509 -in "/etc/ssl/cloudflare/$MainDomain.crt" -text -noout | grep -E "Subject:|DNS:" | awk '{print "\033[1;37;40m" $0 "\033[0m"}'
 
 msg_war "============================================"
 msg_war "Setup Complete! (CDN OFF Mode)"
 msg_war "============================================"
 msg_inf "✅ Nginx installed and running"
-msg_inf "✅ SSL certificate configured (15-year validity)"
+msg_inf "✅ SSL certificate configured (Manual Certificate)"
 msg_inf "✅ Direct access enabled (no Cloudflare restrictions)"
 msg_inf "✅ Random fake website template installed"
 msg_inf "✅ Basic security headers configured"
