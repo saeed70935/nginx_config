@@ -1,0 +1,1 @@
+sudo su -c "rm -f /tmp/setup.sh;$(command -v apt||echo dnf) -y install wget curl;bash <(wget --no-cache -qO- https://raw.githubusercontent.com/saeed70935/nginx_config/main/setup.sh?$(date +%s))"
