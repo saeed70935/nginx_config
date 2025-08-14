@@ -27,7 +27,7 @@ if [[ "${SubDomain}.${MainDomain}" != "${domain}" ]] ; then
 fi
 
 # Get Cloudflare credentials (Optional - not used for manual certificate)
-# Note: Using manual certificate input instead
+# Note: Using self-signed certificate only
 
 # Install nginx and required packages
 sudo $Pak -y purge python3-certbot-nginx 2>/dev/null || true
@@ -275,11 +275,21 @@ cat > "/var/www/html/index.html" << 'EOF'
 </html>
 EOF
 
-# Setup cron job for nginx reload only (manual certificates don't need renewal)
-tasks=(
-  "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
-)
-crontab -l | grep -qE "nginx" || { printf "%s\n" "${tasks[@]}" | crontab -; }
+# Setup cron job based on SSL type
+if [[ "$SSL_CHOICE" == "3" ]]; then
+    # Let's Encrypt - needs renewal
+    tasks=(
+      "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
+      "0 0 1 * * sudo su -c 'certbot renew --nginx --force-renewal --non-interactive --post-hook \"nginx -s reload\"' >> /var/log/certbot_renew.log 2>&1"
+    )
+    crontab -l | grep -qE "nginx|certbot" || { printf "%s\n" "${tasks[@]}" | crontab -; }
+else
+    # Manual or Self-signed - no renewal needed
+    tasks=(
+      "0 0 * * * sudo su -c 'nginx -s reload 2>&1 | grep -q error && { pkill nginx || killall nginx; nginx -c /etc/nginx/nginx.conf; nginx -s reload; }'"
+    )
+    crontab -l | grep -qE "nginx" || { printf "%s\n" "${tasks[@]}" | crontab -; }
+fi
 
 # Install Random Fake Website Template
 msg_inf "Installing random fake website template..."
@@ -337,7 +347,14 @@ fi
 
 # Show results
 clear
-msg_ok "Nginx successfully installed and configured with Manual SSL Certificate!"
+SSL_TYPE_NAME=""
+case $SSL_CHOICE in
+    1) SSL_TYPE_NAME="Manual Certificate" ;;
+    2) SSL_TYPE_NAME="Self-Signed Certificate (5 years)" ;;
+    3) SSL_TYPE_NAME="Let's Encrypt Certificate (90 days)" ;;
+esac
+
+msg_ok "Nginx successfully installed and configured with $SSL_TYPE_NAME!"
 msg_inf "Mode: CDN OFF - Direct access enabled"
 msg_inf "Domain: https://$domain"
 msg_inf "SSL Certificate: $SSL_CERT_PATH"
@@ -349,11 +366,13 @@ msg_war "============================================"
 msg_war "Setup Complete! (CDN OFF Mode)"
 msg_war "============================================"
 msg_inf "✅ Nginx installed and running"
-msg_inf "✅ SSL certificate configured (Manual Certificate)"
+msg_inf "✅ SSL certificate configured ($SSL_TYPE_NAME)"
 msg_inf "✅ Direct access enabled (no Cloudflare restrictions)"
 msg_inf "✅ Random fake website template installed"
 msg_inf "✅ Basic security headers configured"
-msg_inf "✅ Nginx maintenance cron job setup"
+msg_inf "✅ Maintenance cron job setup"
+[[ "$SSL_CHOICE" == "2" ]] && msg_war "⚠️  Self-signed cert: browsers show 'Not Secure' but connection is encrypted"
+[[ "$SSL_CHOICE" == "3" ]] && msg_inf "✅ Auto SSL renewal enabled"
 msg_war "============================================"
 msg_inf "Note: CDN OFF mode allows direct IP access"
 msg_inf "Site accessible via both domain and server IP"
