@@ -115,12 +115,14 @@ server {
     ssl_certificate /etc/ssl/cloudflare/$MainDomain.crt;
     ssl_certificate_key /etc/ssl/cloudflare/$MainDomain.key;
     
-    # Security headers
+    # Security checks
     if (\$host !~* ^(.+\.)?$MainDomain\$ ){return 444;}
     if (\$scheme ~* https) {set \$safe 1;}
     if (\$ssl_server_name !~* ^(.+\.)?$MainDomain\$ ) {set \$safe "\${safe}0"; }
     if (\$safe = 10){return 444;}
-    if (\$request_uri ~ "(\"|'|\`|~|,|:|--|;|%|\\$|&&|\?\?|0x00|0X00|\||\\|\{|\}|\[|\]|<|>|\.\.\.|\.\.\/|\/\/\/)"){set \$hack 1;}
+    
+    # Block malicious requests
+    if (\$request_uri ~ "(\\.\\./|//|0x00|0X00)"){return 444;}
     
     error_page 400 402 403 500 501 502 503 504 =404 /404;
     proxy_intercept_errors on;
@@ -130,7 +132,7 @@ server {
         try_files \$uri \$uri/ =404; 
     }
     
-    # Optional: Add basic security headers
+    # Add basic security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
