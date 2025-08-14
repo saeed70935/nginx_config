@@ -101,97 +101,120 @@ cp "/etc/letsencrypt/live/$MainDomain/privkey.pem" "/etc/ssl/private/"
 chmod 644 /etc/ssl/certs/fullchain.pem
 chmod 600 /etc/ssl/private/privkey.pem
 
-# Create nginx.conf
-cat > /etc/nginx/nginx.conf << 'EOF'
-user www-data;
+# Determine nginx user
+nginxusr="www-data"
+id -u "$nginxusr" &>/dev/null || nginxusr="nginx"
+
+# Create nginx.conf (original structure)
+cat > /etc/nginx/nginx.conf << EOF
+user $nginxusr;
 worker_processes auto;
 pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
 worker_rlimit_nofile 65535;
-
-events {
-    worker_connections 65535;
-    use epoll;
-    multi_accept on;
+events { 
+    worker_connections 65535; 
+    use epoll; 
+    multi_accept on; 
 }
-
 http {
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    
     access_log /var/log/nginx/access.log;
     error_log /var/log/nginx/error.log;
-    
+    gzip on;
     sendfile on;
     tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_tokens off;
-    
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml text/javascript application/javascript application/xml+rss application/json;
-    
+    types_hash_max_size 4096;
+    default_type application/octet-stream;
+    include /etc/nginx/*.types;
+    include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
 }
 EOF
 
-# Create site config
+# Create site config with original structure (minus x-ui and v2rayA)
 cat > "/etc/nginx/sites-available/$MainDomain" << EOF
 server {
+    server_tokens off;
+    server_name $MainDomain *.$MainDomain;
     listen 80;
     listen [::]:80;
-    server_name $MainDomain *.$MainDomain;
-    
-    # ACME challenge for Let's Encrypt renewal
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-        try_files \$uri \$uri/ =404;
-    }
-    
-    # Redirect everything else to HTTPS
-    location / {
-        return 301 https://\$server_name\$request_uri;
-    }
-}
-
-server {
     listen 443 ssl${HTTP2_CONFIG};
     listen [::]:443 ssl${HTTP2_CONFIG};
-    ${HTTP2_NEW}http2 on;
-    
-    server_name $MainDomain *.$MainDomain;
-    root /var/www/html;
-    index index.html index.htm;
+    ${HTTP2_NEW}http2 on; 
+    ${HTTP2_NEW}http3 on;
+    index index.html index.htm index.php index.nginx-debian.html;
+    root /var/www/html/;
     
     # SSL Configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
     ssl_certificate /etc/ssl/certs/fullchain.pem;
     ssl_certificate_key /etc/ssl/private/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-RSA-AES256-GCM-SHA512:DHE-RSA-AES256-GCM-SHA512:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
     
-    # Security Headers
+    # Security checks
+    if (\$host !~* ^(.+\.)?$MainDomain\$ ){return 444;}
+    if (\$scheme ~* https) {set \$safe 1;}
+    if (\$ssl_server_name !~* ^(.+\.)?$MainDomain\$ ) {set \$safe "\${safe}0"; }
+    if (\$safe = 10){return 444;}
+    
+    # Block malicious requests
+    if (\$request_uri ~ "(\\.\\./|//|0x00|0X00)"){return 444;}
+    
+    error_page 400 402 403 500 501 502 503 504 =404 /404;
+    proxy_intercept_errors on;
+    
+    # Subscription Path (simple/encode)
+    location ~ ^/(?<fwdport>\\d+)/sub/(?<fwdpath>.*)\$ {
+        proxy_redirect off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_pass http://127.0.0.1:\$fwdport/sub/\$fwdpath\$is_args\$args;
+        break;
+    }
+    
+    # Subscription Path (json/fragment)
+    location ~ ^/(?<fwdport>\\d+)/json/(?<fwdpath>.*)\$ {
+        proxy_redirect off;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_pass http://127.0.0.1:\$fwdport/json/\$fwdpath\$is_args\$args;
+        break;
+    }
+    
+    # Xray Config Path
+    location ~ ^/(?<fwdport>\\d+)/(?<fwdpath>.*)\$ {
+        client_max_body_size 0;
+        client_body_timeout 1d;
+        grpc_read_timeout 1d;
+        grpc_socket_keepalive on;
+        proxy_read_timeout 1d;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_socket_keepalive on;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        if (\$content_type ~* "GRPC") { grpc_pass grpc://127.0.0.1:\$fwdport\$is_args\$args; break; }
+        proxy_pass http://127.0.0.1:\$fwdport\$is_args\$args;
+        break;
+    }
+    
+    # Default location - serve static files
+    location / { 
+        try_files \$uri \$uri/ =404; 
+    }
+    
+    # Add security headers
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    
-    # Security
-    if (\$host !~* ^(.+\.)?$MainDomain\$ ) { return 444; }
-    
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-    
-    # Block common attack patterns
-    location ~* \.(php|jsp|asp)$ { return 444; }
-    location ~* /\.(ht|git|svn) { return 444; }
 }
 EOF
 
