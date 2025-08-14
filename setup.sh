@@ -95,7 +95,7 @@ fi
 
 echo -e "${GREEN}Wildcard SSL certificate obtained successfully!${NC}"
 
-# Copy certificates to nginx location
+# Copy certificates to nginx location (but keep Let's Encrypt paths in config)
 cp "/etc/letsencrypt/live/$MainDomain/fullchain.pem" "/etc/ssl/certs/"
 cp "/etc/letsencrypt/live/$MainDomain/privkey.pem" "/etc/ssl/private/"
 chmod 644 /etc/ssl/certs/fullchain.pem
@@ -148,8 +148,8 @@ server {
     # SSL Configuration
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!eNULL:!MD5:!DES:!RC4:!ADH:!SSLv3:!EXP:!PSK:!DSS;
-    ssl_certificate /etc/ssl/certs/fullchain.pem;
-    ssl_certificate_key /etc/ssl/private/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/$MainDomain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$MainDomain/privkey.pem;
     
     # Security checks
     if (\$host !~* ^(.+\.)?$MainDomain\$ ){return 444;}
@@ -299,11 +299,7 @@ systemctl start nginx
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh << EOF
 #!/bin/bash
-# Copy renewed certificates to nginx location
-cp "/etc/letsencrypt/live/$MainDomain/fullchain.pem" "/etc/ssl/certs/"
-cp "/etc/letsencrypt/live/$MainDomain/privkey.pem" "/etc/ssl/private/"
-chmod 644 /etc/ssl/certs/fullchain.pem
-chmod 600 /etc/ssl/private/privkey.pem
+# Let's Encrypt auto-renewal hook - nginx uses direct Let's Encrypt paths
 systemctl reload nginx
 echo "\$(date): SSL certificates renewed and nginx reloaded" >> /var/log/ssl-renewal.log
 EOF
@@ -345,7 +341,7 @@ echo -e "${GREEN}===========================================${NC}"
 
 # Show certificate info
 echo -e "${BLUE}Certificate details:${NC}"
-openssl x509 -in /etc/ssl/certs/fullchain.pem -text -noout | grep -E "Subject:|Not After:|DNS:" | head -5
+openssl x509 -in "/etc/letsencrypt/live/$MainDomain/fullchain.pem" -text -noout | grep -E "Subject:|Not After:|DNS:" | head -5
 
 echo -e "${GREEN}"
 echo "🎉 Success! Your SSL certificate is valid and trusted by all browsers!"
