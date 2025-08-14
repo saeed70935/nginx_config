@@ -2,6 +2,9 @@
 #################### Nginx Configuration Script ####################
 [[ $EUID -ne 0 ]] && { echo "not root!"; exec sudo "$0" "$@"; }
 
+# Clean up any previous downloads first
+rm -f /tmp/setup.sh /tmp/nginx_setup.sh ~/setup.sh ~/nginx_setup.sh 2>/dev/null
+
 msg()     { echo -e "\e[1;37;40m $1 \e[0m";}
 msg_ok()  { echo -e "\e[1;32;40m $1 \e[0m";}
 msg_err() { echo -e "\e[1;31;40m $1 \e[0m";}
