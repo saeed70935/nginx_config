@@ -98,21 +98,26 @@ EOF
 # Generate CSR
 openssl req -new -key "/etc/ssl/cloudflare/${MainDomain}.key" -out "/tmp/${MainDomain}.csr" -config "/tmp/${MainDomain}.conf"
 
-# Read CSR content
-CSR_CONTENT=$(cat "/tmp/${MainDomain}.csr" | tr -d '\n')
+# Read CSR content and escape properly for JSON
+CSR_CONTENT=$(cat "/tmp/${MainDomain}.csr" | sed ':a;N;$!ba;s/\n/\\n/g')
 
 # Create certificate via Cloudflare API
 msg_inf "Requesting certificate from Cloudflare API..."
 
+# Create JSON payload file to avoid shell escaping issues
+cat > "/tmp/cert_request.json" << EOF
+{
+  "type": "origin-rsa",
+  "hostnames": ["${MainDomain}", "*.${MainDomain}"],
+  "requested_validity": 5475,
+  "csr": "${CSR_CONTENT}"
+}
+EOF
+
 API_RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/certificates" \
   -H "Authorization: Bearer $CF_API_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{
-    "type": "origin-rsa",
-    "hostnames": ["'$MainDomain'", "*.'$MainDomain'"],
-    "requested_validity": 5475,
-    "csr": "'$CSR_CONTENT'"
-  }')
+  -d @"/tmp/cert_request.json")
 
 # Check if API call was successful
 if echo "$API_RESPONSE" | jq -r '.success' | grep -q "true"; then
@@ -137,7 +142,7 @@ else
 fi
 
 # Clean up temporary files
-rm -f "/tmp/${MainDomain}.csr" "/tmp/${MainDomain}.conf"
+rm -f "/tmp/${MainDomain}.csr" "/tmp/${MainDomain}.conf" "/tmp/cert_request.json"
 
 # Create nginx directories
 mkdir -p /etc/nginx/sites-{available,enabled} /var/log/nginx /var/www /var/www/html
